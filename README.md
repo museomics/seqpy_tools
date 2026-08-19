@@ -915,6 +915,9 @@ This package is intended to support Python 3.12 and later.
 
 ---
 
+# Author
+[Maria Kamouyiaros](https://github.com/Kamouyiaraki) @ NHMUK
+
 # License
 
-This project is licensed under the MIT License. See the [LICENSE]([LICENSE](https://github.com/museomics/seqpy_tools/edit/main/LICENSE)) file for details.
+This project is licensed under the MIT License. See the [LICENSE](https://github.com/museomics/seqpy_tools/blob/main/LICENSE) file for details.
