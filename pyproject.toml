@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seqpy_tools"
+version = "0.1.0"
+description = "A collection of useful Python functions for use in DNA and sample data processing and pipelines"
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "pgzip",
+]
