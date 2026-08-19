@@ -1,4 +1,4 @@
-# metahist_tools
+# seqpy_tools
 Tools for use in metagenomic analyses of historical data and some other helpful functions
 
 
