@@ -36,7 +36,7 @@ jobs:
 
     environment:
       name: pypi
-      url: https://pypi.org/p/my-data-tools
+      url: https://pypi.org/p/seqpy_tools
 
     permissions:
       id-token: write
