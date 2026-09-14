@@ -8,8 +8,9 @@ import pathlib
 import subprocess
 import logging
 import sys
-from typing import Optional, List, Dict, Tuple, Union
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, List, Dict, Tuple, Union
 
 
 logging.basicConfig(
@@ -271,6 +272,131 @@ def get_read_ids(
     else:
         raise FileNotFoundError(f"'{input_source}' is neither a valid file nor directory")
 
+def get_read_ids2(input_source, logger, paired=False, prefix=None, suffix=None, column_name=None, sheet=0):
+    """
+    Function to extract read IDs from a directory or spreadsheet.
+
+    input_source : str
+        Path to a directory or CSV/XLSX file.
+    paired : bool, default=True
+        If True, return only paired IDs (occurring twice); otherwise, return singletons.
+    prefix : str, optional
+        Optional filename prefix to match.
+    suffix : str, optional
+        Optional filename suffix to match before file extension.
+    column_name : str, optional
+        Required for spreadsheet input to specify the column of IDs.
+    sheet : int or str, default=0
+        Sheet index for Excel files.
+    """
+
+    input_path = pathlib.Path(input_source)
+
+    # Spreadsheet input
+    if input_path.is_file():
+        if input_source.endswith(".xlsx"):
+            xlsx_read = xlsx2csv(input_source, sheet=sheet)
+            df = pd.read_csv(xlsx_read)
+            logger.info(f"Using sheet: {xlsx_read}")
+        else:
+            df = pd.read_csv(input_source)
+
+        if prefix:
+            logger.error("Ignoring prefix due to spreadsheet input.")
+
+        if column_name is None or column_name not in df.columns:
+            logger.error("You must provide a valid column_name for spreadsheet input.")
+        ids_to_include = sorted(df[column_name].dropna().astype(str).tolist())
+        return ids_to_include
+
+    # Directory input
+    if input_path.is_dir():
+        all_files = []
+        for root, _, files in os.walk(input_source):
+            for fname in files:
+                all_files.append(os.path.join(root, fname))
+
+        logger.info(f"Total files found: {len(all_files)}")
+
+        # Filter all_files to keep FASTQ and based on prefix/suffix
+        matched_files = []
+        matched_ids = []
+        names = [os.path.basename(f) for f in all_files]
+        all_files_ids = [re.sub(r"(?:_[Rr]?[12])?\.f(?:ast)?q(?:\.gz)?$", "", n) for n in names]
+        logger.info(f"File names before applying prefix/suffix filter: {len(names)}")
+        if prefix or suffix:
+            # Escape prefix/suffix for regex if present
+            pre_pattern = prefix if prefix else ""
+            suf_pattern = suffix if suffix else ""
+            pattern = rf"({pre_pattern}.+?{suf_pattern})(?:_[Rr]?[12])?\.f(?:ast)?q(?:\.gz)?$"
+            my_list = [re.match(pattern, n) is not None for n in names]
+            logger.info(f"Files matching prefix/suffix pattern: {sum(my_list)}")
+            if sum(my_list) == 0:
+                logger.error("No files matched the given prefix/suffix pattern.")
+
+            for i, match in enumerate(my_list):
+                if match:
+                    matched_files.append(names[i])
+                    matched_ids.append(all_files_ids[i])
+        else:
+            matched_files = names
+            matched_ids = all_files_ids
+        logger.info(f"Files after applying prefix/suffix filter: {len(matched_files)}")
+        if len(matched_files) == 0:
+            raise ValueError("No files matched the given prefix/suffix criteria.")
+        logger.info(f"Sample matched files: {matched_files} ...")
+        logger.info(f"Sample matched IDs: {matched_ids} ...")
+        logger.info(f"Total matched files: {len(matched_files)}")
+        logger.info(f"Total matched IDs: {len(matched_ids)}")
+        if len(matched_files) != len(matched_ids):
+            raise ValueError("Mismatch between matched files and IDs.")
+        logger.info("Counting occurrences of matched filenames...")
+
+        # Count occurrences of full matched filenames (including extension)
+        id_counts = Counter(matched_ids)
+        # Build sets of paired and single files
+        paired_ids = set(id_ for id_, c in id_counts.items() if c == 2)
+        single_ids = set(id_ for id_, c in id_counts.items() if c == 1)
+        for id_, c in id_counts.items():
+            if c > 2:
+                logger.info(f"Warning: File '{id_}' appears {c} times. Consider adding a suffix to filter duplicates.")
+
+        # Return match_ids for paired or single files
+        if paired:
+            ids_to_include = paired_ids
+        else:
+            ids_to_include = single_ids
+        logger.info(f"Final IDs: {ids_to_include} ...")
+        return ids_to_include
+
+    raise FileNotFoundError(f"'{input_source}' is neither a valid file nor directory")
+
+def find_paired_files2(input_dir, prefix, recursive=True):
+    """Find paired files for a given prefix in input directory.
+    
+    Args:
+        input_dir (str): Directory to search in
+        prefix (str): Sample prefix to match
+        recursive (bool): Search recursively in subdirectories
+        
+    Returns:
+        tuple: (r1_path, r2_path) if exactly two files found, (None, None) otherwise
+        
+    Logs:
+        Info: When files are found
+        Error: When incorrect number of files found
+    """
+
+    id_pair = glob.glob(os.path.join(input_dir, "**" if recursive else "", f"{prefix}*"), 
+                       recursive=recursive)
+    if len(id_pair) == 2:
+        r1_path, r2_path = sorted(id_pair)
+        logger.info(f"Running files: {r1_path} and {r2_path}")
+        return r1_path, r2_path
+    else:
+        logger.error(f"Error: ID '{prefix}' has {len(id_pair)} matching files.")
+        return None, None
+
 def gzip_files_in_dir(input_dir, max_workers=4):
     filepaths = [
         os.path.join(input_dir, f)
@@ -283,27 +409,16 @@ def gzip_files_in_dir(input_dir, max_workers=4):
 
 def pair_input_files(input_directory, prefixes=None, suffix=None):
     """
-    Scan input_directory for files and pair _1/_2, _r1/r2, or _R1/_R2 files for processing.
-
-    Parameters:
-    - input_directory: path to the directory containing FASTA/FASTQ files
-    - prefixes: (optional) a single prefix string or a list of prefix strings
-    - suffix: (optional) additional suffix (e.g., '_unmerged') to match before _1/_2
-
-    Returns:
-    - List of paired file lists (each with two items)
+    Scan input_directory for files and pair _1/_2, _r1/r2, or _R1/_R2 files.
     """
     if isinstance(prefixes, str):
         prefixes = [prefixes]
 
     all_files = glob.glob(os.path.join(input_directory, "**", "*"), recursive=True)
-    all_files = [f for f in all_files if os.path.isfile(f)]    
-    paired_files = []
-
+    all_files = [f for f in all_files if os.path.isfile(f)]
     file_dict = {}
 
     # Build regex pattern dynamically based on suffix
-    # This matches: <prefix><suffix>_1.fastq, <prefix><suffix>_R2.fq.gz, etc.
     if suffix:
         pattern = re.compile(
             rf"^(.*?){re.escape(suffix)}_[Rr]?[12](?:\.f(?:ast)?q(?:\.gz)?)?$"
@@ -315,22 +430,23 @@ def pair_input_files(input_directory, prefixes=None, suffix=None):
 
     for file in all_files:
         filename = os.path.basename(file)
-        if prefixes:
-            if not any(filename.startswith(prefix) for prefix in prefixes):
-                continue
+        if prefixes and not any(filename.startswith(prefix) for prefix in prefixes):
+            continue
 
         match = pattern.match(filename)
         if match:
             base = match.group(1)
-            file_dict.setdefault(base, []).append(file)  # use full path here
-        for base, files in file_dict.items():
-            if len(files) == 2:
-                files.sort()
-                paired_files.append(files)
+            file_dict.setdefault(base, []).append(file)
 
-    print("Matched files:", file_dict)
-    
+    # Build pairs after collecting everything
+    paired_files = []
+    for base, files in file_dict.items():
+        if len(files) == 2:
+            paired_files.append(sorted(files))
+
     return paired_files
+
+
 
 def pair_input_files_deprecated(input_directory, prefixes=None):
     """
@@ -421,13 +537,13 @@ def find_paired_ids(input_dir, prefixes=None, suffix=None):
     return paired_reads
 
 
-def repair_reads(read1, read2, input_directory, sample_id, logger):
+def repair_reads(read1, read2, input_directory):
     """
     Repairs a pair of read files using bbmap/repair.sh.
     """
-
-    out1 = os.path.join(input_directory, f"{sample_id}_paired_unmerged_2.fastq")
-    out2 = os.path.join(input_directory, f"{sample_id}_paired_unmerged_1.fastq")
+    sample_id = re.match(r"(.*?)(_R?[12])", read1.name).group(1)
+    out1 = os.path.join(input_directory, f"{sample_id}_paired_2.fastq")
+    out2 = os.path.join(input_directory, f"{sample_id}_paired_2.fastq")
     outsingle = os.path.join(input_directory, f"{sample_id}_single.fastq")
 
     cmd = [
@@ -462,15 +578,19 @@ def run_command(command, log_prefix, log_dir="./logs"):
         f_err.write("COMMAND: " + " ".join(command) + "\n\n")
         subprocess.run(command, stdout=f_out, stderr=f_err, text=True, check=True)
 
-def run_subprocess(command, log_prefix, log_dir = "./logs"):
-    result = subprocess.run(command, capture_output=True, text=True)
-    with open(f"{log_dir}/{log_prefix}_output.log", "w") as f_out, open(f"{log_dir}/{log_prefix}_error.log", "w") as f_err:
-        f_out.write(result.stdout)
-        f_err.write(result.stderr)
+def run_subprocess(command, log_prefix, log_dir="./logs", logger=None):
+    os.makedirs(log_dir, exist_ok=True)
+    stdout_path = os.path.join(log_dir, f"{log_prefix}_output.log")
+    stderr_path = os.path.join(log_dir, f"{log_prefix}_error.log")
+
+    with open(stdout_path, "w") as f_out, open(stderr_path, "w") as f_err:
+        result = subprocess.run(command, stdout=f_out, stderr=f_err, text=True)
 
     if result.returncode != 0:
-        logger.error(f"Error running {log_prefix}. See log for details.")
+        if logger:
+            logger.error(f"Error running {log_prefix}. See {stderr_path} for details.")
         raise subprocess.CalledProcessError(result.returncode, command)
+
 
 def setup_logging(log_dir="./logs", log_file="log.out"):
     os.makedirs(log_dir, exist_ok=True)
@@ -500,11 +620,10 @@ def setup_logging(log_dir="./logs", log_file="log.out"):
     return logger
 
 
-def xlsx2csv(file_path, sheet=None):
+def xlsx2csv(file_path, sheet=0):
     if not pathlib.Path(file_path).is_file():
         logger.error(f"Error: The file '{file_path}' does not exist.")
         return None
-
     try:
         # If `sheet` is specified, read only that sheet; otherwise default to the first
         xlsx_read = pd.read_excel(file_path, sheet_name=sheet)
@@ -512,15 +631,11 @@ def xlsx2csv(file_path, sheet=None):
         logger.error(f"Failed to read Excel file: {e}")
         return None
 
-    # Sheet name suffix (only used if more than one sheet is possible)
-    sheet_suffix = f"_sheet{sheet}" if sheet is not None else ""
-
-    csv_name = pathlib.Path(file_path).stem + sheet_suffix
+    csv_name = pathlib.Path(file_path).stem 
     dirname = os.path.dirname(file_path)
     csv_file_path = os.path.join(dirname, f"{csv_name}.csv")
 
-    xlsx_read.to_csv(csv_file_path, index=None, header=True)
+    xlsx_read.to_csv(csv_file_path, index=False, header=True)
     logger.info(f"Converted '{file_path}' (sheet={sheet}) to '{csv_file_path}'")
     return csv_file_path
-
 
