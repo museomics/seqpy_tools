@@ -638,4 +638,3 @@ def xlsx2csv(file_path, sheet=0):
     xlsx_read.to_csv(csv_file_path, index=False, header=True)
     logger.info(f"Converted '{file_path}' (sheet={sheet}) to '{csv_file_path}'")
     return csv_file_path
-
